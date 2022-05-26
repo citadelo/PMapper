@@ -24,6 +24,7 @@ from principalmapper.common import Edge, Node
 from principalmapper.graphing.autoscaling_edges import AutoScalingEdgeChecker
 from principalmapper.graphing.cloudformation_edges import CloudFormationEdgeChecker
 from principalmapper.graphing.codebuild_edges import CodeBuildEdgeChecker
+from principalmapper.graphing.codecommit_edges import CodeCommitEdgeChecker
 from principalmapper.graphing.datapipeline_edges import DataPipelineEdgeChecker
 from principalmapper.graphing.ec2_edges import EC2EdgeChecker
 from principalmapper.graphing.ecs_edges import ECSEdgeChecker
@@ -43,6 +44,7 @@ checker_map = {
     'autoscaling': AutoScalingEdgeChecker,
     'cloudformation': CloudFormationEdgeChecker,
     'codebuild': CodeBuildEdgeChecker,
+    'codecommit': CodeCommitEdgeChecker,
     'datapipeline': DataPipelineEdgeChecker,
     'ec2': EC2EdgeChecker,
     'ecs': ECSEdgeChecker,
