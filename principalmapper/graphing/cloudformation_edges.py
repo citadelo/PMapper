@@ -15,7 +15,9 @@
 #      You should have received a copy of the GNU Affero General Public License
 #      along with Principal Mapper.  If not, see <https://www.gnu.org/licenses/>.
 
+import io
 import logging
+import os
 from typing import List, Optional
 
 from botocore.exceptions import ClientError

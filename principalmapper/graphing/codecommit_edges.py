@@ -17,14 +17,16 @@
 #      along with Principal Mapper.  If not, see <https://www.gnu.org/licenses/>.
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from botocore.exceptions import ClientError
 from botocore.client import BaseClient
 
 from principalmapper.common import Edge, Node
 from principalmapper.graphing.edge_checker import EdgeChecker
-from principalmapper.util import botocore_tools
+from principalmapper.querying import query_interface
+from principalmapper.querying.local_policy_simulation import resource_policy_authorization, ResourcePolicyEvalResult
+from principalmapper.util import arns, botocore_tools
 
 logger = logging.getLogger(__name__)
 
@@ -180,4 +182,174 @@ def generate_edges_locally(nodes: List[Node], codebuild_projects: List[dict], re
     """
 
     result = []
-    return result  # TODO finish this
+    return result # TODO remove
+
+    # we wanna create a role -> [{proj_arn: <>, proj_tags: <>}] map to make eventual lookups faster
+    if codebuild_projects is None:
+        codebuild_map = {}
+    else:
+        codebuild_map = {}  # type: Dict[str, List[dict]]
+        for project in codebuild_projects:
+            if project['project_role'] not in codebuild_map:
+                codebuild_map[project['project_role']] = [{'proj_arn': project['project_arn'], 'proj_tags': project['project_tags']}]
+            else:
+                codebuild_map[project['project_role']].append({'proj_arn': project['project_arn'], 'proj_tags': project['project_tags']})
+
+    for node_destination in nodes:
+        # check if destination is a user, skip if so
+        if ':role/' not in node_destination.arn:
+            continue
+
+        # check that the destination role can be assumed by CodeBuild
+        sim_result = resource_policy_authorization(
+            'codebuild.amazonaws.com',
+            arns.get_account_id(node_destination.arn),
+            node_destination.trust_policy,
+            'sts:AssumeRole',
+            node_destination.arn,
+            {},
+        )
+
+        if sim_result != ResourcePolicyEvalResult.SERVICE_MATCH:
+            continue  # CodeBuild wasn't auth'd to assume the role
+
+        for node_source in nodes:
+            # skip self-access checks
+            if node_source == node_destination:
+                continue
+
+            # check if source is an admin: if so, it can access destination but this is not tracked via an Edge
+            if node_source.is_admin:
+                continue
+
+            # check if source can use existing projects
+            if node_destination.arn in codebuild_map:
+                projects = codebuild_map[node_destination.arn]
+                for project in projects:
+                    startproj_auth, startproj_mfa = query_interface.local_check_authorization_handling_mfa(
+                        node_source,
+                        'codebuild:StartBuild',
+                        project['proj_arn'],
+                        _gen_resource_tag_conditions(project['proj_tags']),
+                        service_control_policy_groups=scps
+                    )
+                    if startproj_auth:
+                        result.append(Edge(
+                            node_source,
+                            node_destination,
+                            '(MFA Required) can use CodeBuild with an existing project to access' if startproj_mfa else 'can use CodeBuild with an existing project to access',
+                            'CodeBuild'
+                        ))
+                        break  # break out of iterating through projects
+
+                    batchstartproj_auth, batchstartproj_mfa = query_interface.local_check_authorization_handling_mfa(
+                        node_source,
+                        'codebuild:StartBuildBatch',
+                        project['proj_arn'],
+                        _gen_resource_tag_conditions(project['proj_tags']),
+                        service_control_policy_groups=scps
+                    )
+                    if batchstartproj_auth:
+                        result.append(Edge(
+                            node_source,
+                            node_destination,
+                            '(MFA Required) can use CodeBuild with an existing project to access' if startproj_mfa else 'can use CodeBuild with an existing project to access',
+                            'CodeBuild'
+                        ))
+                        break  # break out of iterating through projects
+
+            # check if source can create/update a project, pass this role, then start a build
+            condition_keys = {'iam:PassedToService': 'codebuild.amazonaws.com'}
+            pass_role_auth, pass_role_mfa = query_interface.local_check_authorization_handling_mfa(
+                node_source,
+                'iam:PassRole',
+                node_destination.arn,
+                condition_keys,
+                service_control_policy_groups=scps
+            )
+
+            if not pass_role_auth:
+                continue  # if we can't pass this role, then we're done
+
+            # check if the source can create a project and start a build
+            create_proj_auth, create_proj_mfa = query_interface.local_check_authorization_handling_mfa(
+                node_source,
+                'codebuild:CreateProject',
+                '*',
+                {},
+                service_control_policy_groups=scps
+            )
+            if create_proj_auth:
+                startproj_auth, startproj_mfa = query_interface.local_check_authorization_handling_mfa(
+                    node_source,
+                    'codebuild:StartBuild',
+                    '*',
+                    {},
+                    service_control_policy_groups=scps
+                )
+                if startproj_auth:
+                    result.append(Edge(
+                        node_source,
+                        node_destination,
+                        '(MFA Required) can create a project in CodeBuild to access' if create_proj_mfa or pass_role_mfa else 'can create a project in CodeBuild to access',
+                        'CodeBuild'
+                    ))
+                else:
+                    batchstartproj_auth, batchstartproj_mfa = query_interface.local_check_authorization_handling_mfa(
+                        node_source,
+                        'codebuild:StartBuildBatch',
+                        '*',
+                        {},
+                        service_control_policy_groups=scps
+                    )
+                    if batchstartproj_auth:
+                        result.append(Edge(
+                            node_source,
+                            node_destination,
+                            '(MFA Required) can create a project in CodeBuild to access' if create_proj_mfa or pass_role_mfa else 'can create a project in CodeBuild to access',
+                            'CodeBuild'
+                        ))
+
+            # check if the source can update a project and start a build
+            for project in codebuild_projects:
+                update_proj_auth, update_proj_mfa = query_interface.local_check_authorization_handling_mfa(
+                    node_source,
+                    'codebuild:UpdateProject',
+                    project['project_arn'],
+                    _gen_resource_tag_conditions(project['project_tags']),
+                    service_control_policy_groups=scps
+                )
+                if update_proj_auth:
+                    startproj_auth, startproj_mfa = query_interface.local_check_authorization_handling_mfa(
+                        node_source,
+                        'codebuild:StartBuild',
+                        project['project_arn'],
+                        _gen_resource_tag_conditions(project['project_tags']),
+                        service_control_policy_groups=scps
+                    )
+                    if startproj_auth:
+                        result.append(Edge(
+                            node_source,
+                            node_destination,
+                            '(MFA Required) can update a project in CodeBuild to access' if create_proj_mfa or pass_role_mfa else 'can update a project in CodeBuild to access',
+                            'CodeBuild'
+                        ))
+                        break  # just wanna find that there exists one updatable/usable project
+                    else:
+                        batchstartproj_auth, batchstartproj_mfa = query_interface.local_check_authorization_handling_mfa(
+                            node_source,
+                            'codebuild:StartBuildBatch',
+                            project['project_arn'],
+                            _gen_resource_tag_conditions(project['project_tags']),
+                            service_control_policy_groups=scps
+                        )
+                        if batchstartproj_auth:
+                            result.append(Edge(
+                                node_source,
+                                node_destination,
+                                '(MFA Required) can update a project in CodeBuild to access' if create_proj_mfa or pass_role_mfa else 'can update a project in CodeBuild to access',
+                                'CodeBuild'
+                            ))
+                            break  # just wanna find that there exists one updatable/usable project
+
+    return result

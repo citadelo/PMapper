@@ -47,7 +47,7 @@ checker_map = {
     'codecommit': CodeCommitEdgeChecker,
     'datapipeline': DataPipelineEdgeChecker,
     'ec2': EC2EdgeChecker,
-    'ecs': ECSEdgeChecker,
+    'ecs': ECSEdgeChecker,  # TODO: need to verify ECS work
     'glue': GlueEdgeChecker,
     'iam': IAMEdgeChecker,
     'lambda': LambdaEdgeChecker,
